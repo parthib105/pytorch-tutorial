@@ -1,0 +1,52 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "fashion_mnist",
+  "dataset_name": "fashion_mnist",
+  "dataset_size": 36539867,
+  "description": "",
+  "download_size": 36106894,
+  "features": {
+    "image": {
+      "_type": "Image"
+    },
+    "label": {
+      "names": [
+        "T - shirt / top",
+        "Trouser",
+        "Pullover",
+        "Dress",
+        "Coat",
+        "Sandal",
+        "Shirt",
+        "Sneaker",
+        "Bag",
+        "Ankle boot"
+      ],
+      "_type": "ClassLabel"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 72646761,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 31304707,
+      "num_examples": 60000,
+      "dataset_name": "fashion_mnist"
+    },
+    "test": {
+      "name": "test",
+      "num_bytes": 5235160,
+      "num_examples": 10000,
+      "dataset_name": "fashion_mnist"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
