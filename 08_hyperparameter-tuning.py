@@ -3,6 +3,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+import optuna
 import torch
 from datasets import DatasetDict, load_dataset, load_from_disk
 from matplotlib.axes import Axes
@@ -47,19 +48,22 @@ class CustomDataset(Dataset):
 
 # Defining the model
 class MyNN(nn.Module):
-    def __init__(self, num_feat: int) -> None:
+    def __init__(self, inp_dim: int, out_dim: int, num_hidden_layers: int, neurons_per_hidden: int, dropout_rate: float) -> None:
         super().__init__()
-        self.model: nn.Sequential = nn.Sequential(
-            nn.Linear(num_feat, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(128, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(64, 10),
-        )
+        layers: list[nn.Module] = []
+
+        for i in range(num_hidden_layers):
+            layers.append(nn.Linear(inp_dim, neurons_per_hidden))
+            layers.append(nn.BatchNorm1d(neurons_per_hidden))  # Add batch normalization layer
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(p=dropout_rate))  # Add dropout layer with suggested dropout rate
+
+            inp_dim = neurons_per_hidden  # Update input dimension for the next layer
+
+        # Add the output layer
+        layers.append(nn.Linear(neurons_per_hidden, out_dim))
+
+        self.model: nn.Sequential = nn.Sequential(*layers)
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         return self.model(X)
@@ -200,6 +204,51 @@ def evaluate_model(model: MyNN, test_loader: DataLoader) -> tuple[float, float, 
     return accuracy, avg_loss, y_true, y_pred_all
 
 
+# optuna objective function
+def objective(
+    trial: optuna.Trial,
+    X_train: torch.Tensor,
+    y_train: torch.Tensor,
+    X_test: torch.Tensor,
+    y_test: torch.Tensor,
+) -> float:
+    # Dimensions
+    inp_dim: int = X_train.shape[1]
+    out_dim: int = len(CLASS_NAMES)
+
+    # Hyperparameter search space
+    num_hidden_layers: int = trial.suggest_int("num_hidden_layers", 2, 8)
+    neurons_per_hidden: int = trial.suggest_int("neurons_per_hidden", 32, 256)
+    epochs: int = trial.suggest_int("epochs", 10, 60, step=10)
+    learning_rate: float = trial.suggest_float("learning_rate", 1e-4, 1e-1, log=True)
+    dropout_rate: float = trial.suggest_float("dropout_rate", 0.1, 0.5, step=0.1)
+    batch_size: int = trial.suggest_categorical("batch_size", [16, 32, 64, 128])
+    optimizer_name: str = trial.suggest_categorical("optimizer", ["SGD", "Adam", "RMSprop", "AdamW"])
+
+    # Instantiate the model, loss function, and optimizer
+    myModel: MyNN = MyNN(inp_dim, out_dim, num_hidden_layers, neurons_per_hidden, dropout_rate).to(gpu_device)
+    loss_fn = nn.CrossEntropyLoss()
+    optimizer_cls = getattr(torch.optim, optimizer_name)
+    optimizer = optimizer_cls(myModel.parameters(), lr=learning_rate, weight_decay=1e-4)
+
+    # Define dataset and dataloader
+    train_loader: DataLoader
+    test_loader: DataLoader
+    train_loader, test_loader = build_dataloaders(X_train, y_train, X_test, y_test, batch_size=batch_size)
+
+    # Training loop
+    for epoch in range(epochs):
+        train_loss: float = train_model(myModel, train_loader, optimizer, loss_fn)
+
+        # Evaluate on test set
+        accuracy, avg_test_loss, _, _ = evaluate_model(myModel, test_loader)
+
+        if DEBUG and (epoch + 1) % 50 == 0:
+            print(f"[Epoch] {epoch + 1}/{epochs} => Train Loss: {train_loss:.4f} | Test Loss: {avg_test_loss:.4f} | Test Acc: {accuracy:.4f}")
+
+    return accuracy  # Return accuracy as the objective to maximize
+
+
 # to plot first few sample images
 def plot_sample_images(
     images: torch.Tensor, labels: torch.Tensor, n: int = 10, plots_dir: str = "./plots"
@@ -307,37 +356,38 @@ if __name__ == "__main__":
     if DEBUG:
         plot_sample_images(X_train, y_train, n=10)
 
-    # Define dataset and dataloader
-    train_loader: DataLoader
-    test_loader: DataLoader
-    train_loader, test_loader = build_dataloaders(X_train, y_train, X_test, y_test, batch_size=32)
-
     # Defining the parameters
     torch.manual_seed(23)
-    epochs: int = 200
-    learning_rate: float = 0.01
 
-    # Instantiate the model, loss function, and optimizer
-    myModel: MyNN = MyNN(X_train.shape[1]).to(gpu_device)
-    loss_fn = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(myModel.parameters(), lr=learning_rate, weight_decay=1e-4)
+    # Create an Optuna study to maximize accuracy
+    study: optuna.Study = optuna.create_study(direction="maximize")
+    study.optimize(
+        lambda trial: objective(
+            trial,
+            X_train,
+            y_train,
+            X_test,
+            y_test,
+        ),
+        n_trials=15,
+    )
 
-    # Training and Evaluation loop per epoch
-    train_losses: list[float] = []
-    test_losses: list[float] = []
-
-    for epoch in range(epochs):
-        # Train for 1 epoch
-        train_loss = train_model(myModel, train_loader, optimizer, loss_fn)
-        train_losses.append(train_loss)
-
-        # Evaluate to get the test loss and accuracy for this epoch
-        accuracy, test_loss, y_true, y_pred = evaluate_model(myModel, test_loader)
-        test_losses.append(test_loss)
-
-        if (epoch == 0 or (epoch + 1) % 10 == 0):
-            print(f"[Epoch] {epoch + 1}/{epochs} => Train Loss: {train_loss:.4f} | Test Loss: {test_loss:.4f} | Test Acc: {accuracy:.4f}")
+    # print the best hyperparameters
+    print("Best hyperparameters found:")
+    for key, value in study.best_params.items():
+        print(f"{key}: {value}")
 
     # Plot training/evaluation metrics
-    plot_loss(train_losses, test_losses)
-    plot_confusion_matrix(y_true, y_pred)
+    # plot_loss(train_losses, test_losses)
+    # plot_confusion_matrix(y_true, y_pred)
+
+"""
+Best hyperparameters found:
+    num_hidden_layers: 7
+    neurons_per_hidden: 137
+    epochs: 40
+    learning_rate: 0.00010788556585223089
+    dropout_rate: 0.1
+    batch_size: 128
+    optimizer: RMSprop
+"""
